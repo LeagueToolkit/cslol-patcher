@@ -1,6 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 // do not reorder
+#include <tlhelp32.h>
+// do not reorder
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 // do not reorder
@@ -9,17 +12,26 @@
 
 #define MAX_PATH_WIDE 1024
 #define PAGE_SIZE 0x1000
+#define CSLOL_PIPE "\\\\.\\pipe\\cslol-pipe"
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
+// #define LOL_WINDOW "VALORANT  "
+// #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
 // TODO: make this into something nicer:
 #define error_if(condition, msg)            \
-    if (condition) {                        \
+    if ((condition)) {                      \
         MessageBoxA(0, #condition, msg, 0); \
         return 0;                           \
     }
 
-static WCHAR CreateFileA_prefix[MAX_PATH_WIDE] = {0};
+typedef struct cslol_config_s {
+    UINT32 flags;
+    WCHAR prefix[MAX_PATH_WIDE];
+    char pad[PAGE_SIZE - sizeof(unsigned) - sizeof(WCHAR) * MAX_PATH_WIDE];
+} cslol_config_t;
+
+static cslol_config_t g_config = {0, {0}, {0}};
 
 typedef HANDLE(WINAPI* CreateFileA_fnptr)(LPCSTR lpFileName,
                                           DWORD dwDesiredAccess,
@@ -57,7 +69,7 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
     LPWSTR dst = buffer;
 
     // Copy prefix
-    for (LPWSTR src = CreateFileA_prefix; *src; ++dst, ++src) *dst = *src;
+    for (LPWSTR src = g_config.prefix; *src; ++dst, ++src) *dst = *src;
 
     // Copy filename
     for (LPCSTR src = lpFileName; *src; ++dst, ++src) *dst = *src == '/' ? L'\\' : *src;
@@ -206,7 +218,7 @@ static UINT_PTR find_in_image(LPVOID module, BYTE* what, SIZE_T size, SIZE_T ste
         page += PAGE_SIZE;
     }
 
-    // If we found raw offset, walk sections to transform it into virtual address + base of module.
+// If we found raw offset, walk sections to transform it into virtual address + base of module.
 done:
     CloseHandle(file);
     for (i = 0; raw != -1 && i != nt_headers.FileHeader.NumberOfSections; i += 1) {
@@ -239,42 +251,56 @@ static int patch_CRYPTO_free() {
     return 1;
 }
 
-static LRESULT msg_hookproc(int code, WPARAM wParam, LPARAM lParam) {
-    return CallNextHookEx(NULL, code, wParam, lParam);
-}
-
-__asm__(".section .shared,\"ds\"\n");
-static volatile int s_inited __attribute__((section(".shared"))) = {0};
-static WCHAR s_prefix_buffer[MAX_PATH_WIDE] __attribute__((section(".shared"))) = {0};
-
 static HINSTANCE g_instance = NULL;
 
-static void init_in_process() {
-    // Ensure that dll stays loaded.
-    {
-        WCHAR path[MAX_PATH_WIDE];
-        GetModuleFileNameW(g_instance, path, sizeof(path));
-        LoadLibraryW(path);
-    }
+static HANDLE g_pipe = NULL;
 
-    // Copy shared prefix buffer into private prefix buffer.
-    {
-        memcpy_s(CreateFileA_prefix, sizeof(CreateFileA_prefix), s_prefix_buffer, sizeof(s_prefix_buffer));
-        ++s_inited;
-    }
+static int cslol_init_in_process() {
+    HANDLE handle = CreateFileA(CSLOL_PIPE,
+                                GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                NULL);
+    error_if(!handle || handle == INVALID_HANDLE_VALUE, "Failed to open pipe!");
+
+    BOOL result_read = ReadFile(handle, &g_config, sizeof(g_config), NULL, NULL);
+    CloseHandle(handle);
+    error_if(!result_read, "Failed to read pipe!");
 
     // Pach int_rsa_verify via CRYPTO_free before patching CreateFileA.
-    if (!patch_CRYPTO_free()) {
-        return;
+    if (!(g_config.flags & CSLOL_HOOK_DISABLE_VERIFY)) {
+        error_if(!patch_CRYPTO_free(), "Failed to patch crypto free!");
     }
 
     // Patch CreateFileA for filesystem overlay effect.
-    if (!patch_CreateFileA()) {
-        return;
+    if (!(g_config.flags & CSLOL_HOOK_DISABLE_FILE)) {
+        error_if(!patch_CreateFileA(), "Failed to patch CreateFileA!");
     }
+    return 1;
 }
 
-CSLOL_API const char* cslol_set_prefix(const char16_t* prefix) {
+CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+CSLOL_API const char* cslol_init() {
+    if (g_pipe) return NULL;
+    HANDLE pipe = CreateNamedPipeA(CSLOL_PIPE,
+                                   PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                   PIPE_TYPE_MESSAGE,
+                                   1,
+                                   0,
+                                   0,
+                                   0,
+                                   NULL);
+    if (!pipe || pipe == INVALID_HANDLE_VALUE) return "Failed to create pipe!";
+    g_pipe = pipe;
+    return NULL;
+}
+
+CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     WCHAR buffer[MAX_PATH_WIDE] = {'\\', '\\', '?', '\\'};
     WCHAR* buffer_start = buffer + 4;
     WCHAR* buffer_end = buffer_start + MAX_PATH_WIDE - 1;
@@ -294,43 +320,54 @@ CSLOL_API const char* cslol_set_prefix(const char16_t* prefix) {
     }
 
     // Prepend \\\\?\\ if not there already.
-    if (0 != memcmp(buffer_start, "\\\0\\\0", 4)) {
+    if (0 != memcmp(buffer_start, u"\\\\", 4)) {
         buffer_start = buffer;
         length += 4;
     }
 
-    // Copy to shared buffer.
-    memcpy_s(s_prefix_buffer, sizeof(s_prefix_buffer), buffer_start, (length + 1) * sizeof(WCHAR));
+    memcpy_s(g_config.prefix, sizeof(g_config.prefix), buffer_start, (length + 1) * sizeof(WCHAR));
 
     return NULL;
 }
 
-CSLOL_API void cslol_sleep(unsigned ms) { Sleep(ms); }
-
-CSLOL_API unsigned cslol_find_lol() {
-    HWND hwnd = FindWindowExA(NULL, NULL, NULL, LOL_WINDOW);
-    if (hwnd) {
-        DWORD pid = 0;
-        DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
-        if (pid && tid) return tid;
-    }
-    return 0;
+CSLOL_API const char* cslol_set_flags(unsigned flags) {
+    g_config.flags = flags;
+    return NULL;
 }
 
-CSLOL_API const char* cslol_hook(unsigned tid) {
-    const int old_inited = s_inited;
-    HHOOK hhook = SetWindowsHookExA(WH_GETMESSAGE, &msg_hookproc, g_instance, tid);
-    if (!hhook) return "Failed to set hook.";
-    while (old_inited == s_inited) cslol_sleep(250);
-    UnhookWindowsHookEx(hhook);
+CSLOL_API unsigned cslol_find() {
+    HWND hwnd = FindWindowExA(NULL, NULL, NULL, LOL_WINDOW);
+    if (!hwnd) return 0;
+    return GetWindowThreadProcessId(hwnd, NULL);
+}
+
+CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) {
+    if (!g_pipe) return "Not initialized!";
+
+    HHOOK hook = SetWindowsHookExA(WH_GETMESSAGE, &cslol_msg_hookproc, g_instance, tid);
+    if (!hook) return "Failed to create hook!";
+
+    puts("Waiting for connect...");
+    BOOL result_connect = ConnectNamedPipe(g_pipe, NULL);
+    if (!result_connect) return "Failed to connect named pipe!";
+
+    puts("Writing to pipe!");
+    BOOL result_write = WriteFile(g_pipe, &g_config, sizeof(g_config), NULL, NULL);
+    if (!result_write) return "Failed to write named pipe!";
+
+    UnhookWindowsHookEx(hook);
     return NULL;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // DisableThreadLibraryCalls(inst);
         g_instance = inst;
         if (GetModuleHandleA(LOL_EXE) == GetModuleHandleA(NULL)) {
-            init_in_process();
+            WCHAR path[MAX_PATH_WIDE];
+            GetModuleFileNameW(g_instance, path, sizeof(path));
+            LoadLibraryW(path);
+            cslol_init_in_process();
         }
     }
     return 1;

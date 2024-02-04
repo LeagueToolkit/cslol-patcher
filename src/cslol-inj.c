@@ -12,16 +12,25 @@ int main() {
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
     // Grab args.
+    if (argc < 2) {
+        puts("No profile path provided!");
+        return -1;
+    }
+
+    // Initialize first proces.
     {
-        if (argc < 2) {
-            puts("No profile path provided!");
+        const char* error = cslol_init();
+        if (error) {
+            printf("Failed to init: %s: %x\n", error, GetLastError());
             return -1;
         }
     }
 
+    // cslol_set_flags(CSLOL_HOOK_DISABLE_ALL);
+
     // Set prefix.
     {
-        const char* error = cslol_set_prefix((const char16_t*)argv[1]);
+        const char* error = cslol_set_config((const char16_t*)argv[1]);
         if (error) {
             printf("Failed to set prefix: %s\n", error);
             return -1;
@@ -33,11 +42,11 @@ int main() {
         // Scan for lol.
         puts("Waiting for game to start...");
         unsigned tid;
-        while (!(tid = cslol_find_lol())) cslol_sleep(16);
+        while (!(tid = cslol_find())) Sleep(16);
 
         puts("Game found...");
         {
-            const char* error = cslol_hook(tid);
+            const char* error = cslol_hook(tid, 30000, 100);
             if (error) {
                 printf("Failed to hook: %s\n", error);
                 return -1;
@@ -45,7 +54,7 @@ int main() {
         }
 
         puts("Waiting for game to exit...");
-        while (cslol_find_lol()) cslol_sleep(1000);
+        while (tid == cslol_find()) Sleep(1000);
     }
 
     return 0;
