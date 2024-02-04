@@ -1,9 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 // do not reorder
-#include <tlhelp32.h>
-// do not reorder
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 // do not reorder
@@ -12,7 +9,6 @@
 
 #define MAX_PATH_WIDE 1024
 #define PAGE_SIZE 0x1000
-#define CSLOL_PIPE "\\\\.\\pipe\\cslol-pipe"
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
 // #define LOL_WINDOW "VALORANT  "
@@ -251,23 +247,19 @@ static int patch_CRYPTO_free() {
     return 1;
 }
 
+__asm__(".section .shared,\"ds\"\n");
+
+static volatile int s_inited __attribute__((section(".shared"))) = {0};
+
+static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, {0}, {0}};
+
 static HINSTANCE g_instance = NULL;
 
-static HANDLE g_pipe = NULL;
-
 static int cslol_init_in_process() {
-    HANDLE handle = CreateFileA(CSLOL_PIPE,
-                                GENERIC_READ,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                NULL,
-                                OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL,
-                                NULL);
-    error_if(!handle || handle == INVALID_HANDLE_VALUE, "Failed to open pipe!");
+    s_inited++;
 
-    BOOL result_read = ReadFile(handle, &g_config, sizeof(g_config), NULL, NULL);
-    CloseHandle(handle);
-    error_if(!result_read, "Failed to read pipe!");
+    // Copy in config.
+    memcpy_s(&g_config, sizeof(g_config), (const void*)&s_config, sizeof(s_config));
 
     // Pach int_rsa_verify via CRYPTO_free before patching CreateFileA.
     if (!(g_config.flags & CSLOL_HOOK_DISABLE_VERIFY)) {
@@ -286,17 +278,6 @@ CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lPara
 }
 
 CSLOL_API const char* cslol_init() {
-    if (g_pipe) return NULL;
-    HANDLE pipe = CreateNamedPipeA(CSLOL_PIPE,
-                                   PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                                   PIPE_TYPE_MESSAGE,
-                                   1,
-                                   0,
-                                   0,
-                                   0,
-                                   NULL);
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return "Failed to create pipe!";
-    g_pipe = pipe;
     return NULL;
 }
 
@@ -325,13 +306,13 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
         length += 4;
     }
 
-    memcpy_s(g_config.prefix, sizeof(g_config.prefix), buffer_start, (length + 1) * sizeof(WCHAR));
+    memcpy_s((void*)s_config.prefix, sizeof(s_config.prefix), buffer_start, (length + 1) * sizeof(WCHAR));
 
     return NULL;
 }
 
 CSLOL_API const char* cslol_set_flags(unsigned flags) {
-    g_config.flags = flags;
+    s_config.flags = flags;
     return NULL;
 }
 
@@ -342,26 +323,25 @@ CSLOL_API unsigned cslol_find() {
 }
 
 CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) {
-    if (!g_pipe) return "Not initialized!";
-
+    const int old_inited = s_inited;
     HHOOK hook = SetWindowsHookExA(WH_GETMESSAGE, &cslol_msg_hookproc, g_instance, tid);
     if (!hook) return "Failed to create hook!";
 
-    puts("Waiting for connect...");
-    BOOL result_connect = ConnectNamedPipe(g_pipe, NULL);
-    if (!result_connect) return "Failed to connect named pipe!";
-
-    puts("Writing to pipe!");
-    BOOL result_write = WriteFile(g_pipe, &g_config, sizeof(g_config), NULL, NULL);
-    if (!result_write) return "Failed to write named pipe!";
+    for (long long t = timeout; t > 0; t -= step) {
+        Sleep(step);
+        if (old_inited != s_inited) {
+            UnhookWindowsHookEx(hook);
+            return NULL;
+        }
+    }
 
     UnhookWindowsHookEx(hook);
-    return NULL;
+    return "Timeout out while waiting for init!";
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
-        // DisableThreadLibraryCalls(inst);
+        DisableThreadLibraryCalls(inst);
         g_instance = inst;
         if (GetModuleHandleA(LOL_EXE) == GetModuleHandleA(NULL)) {
             WCHAR path[MAX_PATH_WIDE];

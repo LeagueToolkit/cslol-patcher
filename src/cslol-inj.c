@@ -21,7 +21,7 @@ int main() {
     {
         const char* error = cslol_init();
         if (error) {
-            printf("Failed to init: %s: %x\n", error, GetLastError());
+            printf("Failed to init: %s\n", error);
             return -1;
         }
     }
