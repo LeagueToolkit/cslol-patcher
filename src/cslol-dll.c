@@ -297,7 +297,7 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     // Append \\ to end.
     if (buffer_start[length - 1] != '\\') {
         buffer_start[length++] = '\\';
-        buffer_start[length] = '0';
+        buffer_start[length] = '\0';
     }
 
     // Prepend \\\\?\\ if not there already.
