@@ -1,0 +1,29 @@
+name: BuildIt
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+    - name: "Clone source"
+      uses: actions/checkout@v2
+      with:
+        submodules: 'true'
+    - name: "Setup msvc"
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: "Build"
+      run: |
+        mkdir build
+        cd build
+        cmake -G "NMake Makefiles" "-DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo" "-DCMAKE_C_COMPILER:STRING=clang-cl" "-DCMAKE_MSVC_RUNTIME_LIBRARY:STRING=MultiThreaded" ..
+        cmake --build .
+    - name: "Package"
+      shell: bash
+      run: |
+        7z a cslol-patcher.zip build/cslol-inj.exe build/cslol-inj.pdb build/cslol-dll.dll build/cslol-dll.pdb
+    - name: 'Upload Artifact'
+      uses: actions/upload-artifact@v2
+      with:
+        name: cslol-patcher
+        path: cslol-patcher.zip
+        retention-days: 15
