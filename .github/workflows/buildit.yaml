@@ -21,7 +21,7 @@ jobs:
       shell: bash
       run: |
         7z a cslol-patcher.zip build/cslol-*
-        7z rn cslol-patcher.zipp build/ cslol-patcher/
+        7z rn cslol-patcher.zip build/ cslol-patcher/
     - name: 'Upload Artifact'
       uses: actions/upload-artifact@v2
       with:
