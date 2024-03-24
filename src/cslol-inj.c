@@ -54,7 +54,11 @@ int main() {
         }
 
         puts("Waiting for game to exit...");
-        while (tid == cslol_find()) Sleep(1000);
+        while (tid == cslol_find()) {
+            char const* msg = NULL;
+            while ((msg = cslol_log_pull())) puts(msg);
+            Sleep(1000);
+        }
     }
 
     return 0;

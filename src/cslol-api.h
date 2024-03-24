@@ -22,10 +22,19 @@ extern "C" {
 #    endif
 #endif
 
-#define CSLOL_HOOK_DISALBE_NONE 0u
-#define CSLOL_HOOK_DISABLE_VERIFY 1u
-#define CSLOL_HOOK_DISABLE_FILE 2u
-#define CSLOL_HOOK_DISABLE_ALL (unsigned)(-1)
+typedef enum cslol_hook_flags {
+    CSLOL_HOOK_DISALBE_NONE = 0u,
+    CSLOL_HOOK_DISABLE_VERIFY = 1u,
+    CSLOL_HOOK_DISABLE_FILE = 2u,
+    CSLOL_HOOK_DISABLE_ALL = (unsigned)(-1),
+} cslol_hook_flags;
+
+typedef enum cslol_log_level {
+    CSLOL_LOG_ERROR = 0,
+    CSLOL_LOG_INFO = 0x10,
+    CSLOL_LOG_DEBUG = 0x20,
+    CSLOL_LOG_ALL = 0x1000,
+} cslol_log_level;
 
 // Msg proc used for injection.
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam);
@@ -37,7 +46,13 @@ CSLOL_API const char* cslol_init();
 CSLOL_API const char* cslol_set_config(const char16_t* prefix);
 
 // Sets flags, return error if any.
-CSLOL_API const char* cslol_set_flags(unsigned flags);
+CSLOL_API const char* cslol_set_flags(cslol_hook_flags flags);
+
+// Set log level, return error if any.
+CSLOL_API const char* cslol_set_log_level(cslol_log_level level);
+
+// Pull log message if any.
+CSLOL_API const char* cslol_log_pull();
 
 // Find thread id of running lol instance.
 CSLOL_API unsigned cslol_find();

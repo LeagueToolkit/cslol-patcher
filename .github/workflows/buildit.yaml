@@ -20,7 +20,7 @@ jobs:
     - name: "Package"
       shell: bash
       run: |
-        7z a cslol-patcher.zip build/cslol-inj.exe build/cslol-inj.pdb build/cslol-dll.dll build/cslol-dll.pdb
+        7z a cslol-patcher.zip build/cslol-*
     - name: 'Upload Artifact'
       uses: actions/upload-artifact@v2
       with:

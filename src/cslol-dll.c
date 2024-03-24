@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 // do not reorder
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 // do not reorder
@@ -11,23 +12,30 @@
 #define PAGE_SIZE 0x1000
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
+#define LOG_BUFFER 0x10000
 // #define LOL_WINDOW "VALORANT  "
 // #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
-// TODO: make this into something nicer:
-#define error_if(condition, msg)            \
-    if ((condition)) {                      \
-        MessageBoxA(0, #condition, msg, 0); \
-        return 0;                           \
+#define log_error(msg, ...) write_log(CSLOL_LOG_ERROR, "error: " msg, ##__VA_ARGS__)
+#define log_info(msg, ...) write_log(CSLOL_LOG_INFO, "info: " msg, ##__VA_ARGS__)
+#define log_debug(msg, ...) write_log(CSLOL_LOG_DEBUG, "debug: " msg, ##__VA_ARGS__)
+#define log_trace(msg, ...) write_log(CSLOL_LOG_TRACE, "trace: " msg, ##__VA_ARGS__)
+
+#define error_if(condition, msg, ...)             \
+    if ((condition)) {                            \
+        log_error(#condition msg, ##__VA_ARGS__); \
+        return 0;                                 \
     }
 
 typedef struct cslol_config_s {
-    UINT32 flags;
+    cslol_hook_flags flags;
+    cslol_log_level log_level;
     WCHAR prefix[MAX_PATH_WIDE];
-    char pad[PAGE_SIZE - sizeof(unsigned) - sizeof(WCHAR) * MAX_PATH_WIDE];
 } cslol_config_t;
 
-static cslol_config_t g_config = {0, {0}, {0}};
+static cslol_config_t g_config = {0, 0, {0}};
+
+static void write_log(int level, char const* fmt, ...);
 
 typedef HANDLE(WINAPI* CreateFileA_fnptr)(LPCSTR lpFileName,
                                           DWORD dwDesiredAccess,
@@ -84,6 +92,7 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
 
     // If failed call original.
     if (result == INVALID_HANDLE_VALUE) goto call_original;
+    log_info("redirected wad: %s", lpFileName);
 
     // All done...
     return result;
@@ -116,17 +125,20 @@ static int patch_CreateFileA() {
 #pragma pack(pop)
 
     LPVOID module = GetModuleHandleW(L"KERNEL32.DLL");
-    error_if(!module || module == INVALID_HANDLE_VALUE, "Failed to get kernel32 module!");
+    error_if(!module || module == INVALID_HANDLE_VALUE, "Failed to get kernel32 module because %x", GetLastError());
 
     ImportThunk* thunk = (ImportThunk*)GetProcAddress(module, "CreateFileA");
-    error_if(!thunk, "Failed to get CreateFileA import thunk.");
-    error_if(thunk->jmp != 0x25FF, "CreateFileA import thunk is not jmp rel32.");
+    error_if(!thunk, "Failed to get CreateFileA import thunk because %x", GetLastError());
+
+    log_info("patching thunk %p from module %p", thunk, module);
+
+    error_if(thunk->jmp != 0x25FF, "CreateFileA import unexpected thunk: %x %x", thunk->jmp, thunk->rel32);
 
     CreateFileA_original = *(CreateFileA_fnptr*)(thunk->pad + thunk->rel32);
 
     ImportTrampoline tramp = {{0x48, 0xB8u}, (UINT64)&CreateFileA_hook, {0xFF, 0xE0}};
     BOOL result = WriteProcessMemory((HANDLE)-1, thunk, &tramp, sizeof(tramp), NULL);
-    error_if(result == 0, "Failed to write import trampoline!");
+    error_if(result == 0, "Failed to write import trampoline because: %x", GetLastError());
 
     return 1;
 }
@@ -179,10 +191,10 @@ static UINT_PTR find_in_image(LPVOID module, BYTE* what, SIZE_T size, SIZE_T ste
     // Get main module path.
     WCHAR path[MAX_PATH_WIDE];
     DWORD path_size = GetModuleFileNameW(module, path, sizeof(path));
-    error_if(path_size >= MAX_PATH_WIDE, "Failed to get module path.");
+    error_if(path_size >= MAX_PATH_WIDE, "Failed to get module path because %x", GetLastError());
 
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    error_if(!file || file == INVALID_HANDLE_VALUE, "Failed to open module file!");
+    error_if(!file || file == INVALID_HANDLE_VALUE, "Failed to open module file because %x", GetLastError());
 
     // Buffer up to 2 pages.
     BYTE buffer[PAGE_SIZE * 2] = {0};
@@ -242,7 +254,12 @@ static int patch_CRYPTO_free() {
     UINT_PTR offset = find_in_image(module, pattern, sizeof(pattern), 8);
     error_if(!offset, "Failed to find CRYPTO_free ptr.");
 
-    *(LPVOID*)(offset + 32 + (UINT_PTR)module) = &CRYPTO_free_hook;
+    log_info("patching module: %p CRYPTO_free offset: %p", module, offset);
+
+    void* dst = (LPVOID)(offset + 32 + (char*)module);
+    void* hook_ptr = &CRYPTO_free_hook;
+    BOOL result = WriteProcessMemory((HANDLE)-1, dst, &hook_ptr, sizeof(hook_ptr), NULL);
+    error_if(result == 0, "Failed to write crypto free ptr: %x", GetLastError());
 
     return 1;
 }
@@ -251,15 +268,30 @@ __asm__(".section .shared,\"ds\"\n");
 
 static volatile int s_inited __attribute__((section(".shared"))) = {0};
 
-static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, {0}, {0}};
+static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, 0, {0}};
+
+static int s_log_end __attribute__((section(".shared"))) = {0};
+
+static int s_log_start __attribute__((section(".shared"))) = {0};
+
+static int g_log_end = {0};
+
+static char s_log_buffer[LOG_BUFFER] __attribute__((section(".shared"))) = {0};
+
+static BOOL g_is_in_process = {0};
 
 static HINSTANCE g_instance = NULL;
 
 static int cslol_init_in_process() {
     s_inited++;
+    s_log_end = 0;
+    s_log_start = 0;
+    g_is_in_process = 1;
 
     // Copy in config.
     memcpy_s(&g_config, sizeof(g_config), (const void*)&s_config, sizeof(s_config));
+
+    log_info("Init in process!");
 
     // Pach int_rsa_verify via CRYPTO_free before patching CreateFileA.
     if (!(g_config.flags & CSLOL_HOOK_DISABLE_VERIFY)) {
@@ -270,6 +302,8 @@ static int cslol_init_in_process() {
     if (!(g_config.flags & CSLOL_HOOK_DISABLE_FILE)) {
         error_if(!patch_CreateFileA(), "Failed to patch CreateFileA!");
     }
+
+    log_info("Init done!");
     return 1;
 }
 
@@ -311,8 +345,13 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     return NULL;
 }
 
-CSLOL_API const char* cslol_set_flags(unsigned flags) {
+CSLOL_API const char* cslol_set_flags(cslol_hook_flags flags) {
     s_config.flags = flags;
+    return NULL;
+}
+
+CSLOL_API const char* cslol_set_log_level(cslol_log_level level) {
+    s_config.log_level = level;
     return NULL;
 }
 
@@ -339,6 +378,38 @@ CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) 
     return "Timeout out while waiting for init!";
 }
 
+CSLOL_API char const* cslol_log_pull() {
+    if (s_log_start >= s_log_end) {
+        return NULL;
+    }
+    const char* msg = &s_log_buffer[s_log_start];
+    s_log_start += strlen(msg) + 1;
+    return msg;
+}
+
+static void write_log(cslol_log_level level, char const* fmt, ...) {
+    if (level > g_config.log_level) {
+        return;
+    }
+    const int pos = g_log_end;
+    const int remain = sizeof(s_log_buffer) - pos;
+    if (remain < 1) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    const int ret = vsnprintf(&s_log_buffer[pos], remain, fmt, args);
+    va_end(args);
+
+    if (ret <= 0 || ret >= remain) {
+        return;
+    }
+
+    g_log_end = pos + ret + 1;
+    s_log_end = pos + ret + 1;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
@@ -349,6 +420,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
             LoadLibraryW(path);
             cslol_init_in_process();
         }
+    }
+    if (reason == DLL_PROCESS_DETACH && g_is_in_process) {
+        log_info("Exit in process!");
     }
     return 1;
 }
