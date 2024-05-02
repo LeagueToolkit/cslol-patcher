@@ -66,7 +66,7 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
     if (dwFlagsAndAttributes != FILE_ATTRIBUTE_NORMAL) goto call_original;
 
     // Only care about .wad files in "DATA/".
-    if (memcmp(lpFileName, "DATA/", 5) != 0) goto call_original;
+    if (_strnicmp(lpFileName, "DATA/", 5) != 0) goto call_original;
     if (!strstr(lpFileName, ".wad")) goto call_original;
 
     // TODO: Maybe some sort of logging would be good here?
