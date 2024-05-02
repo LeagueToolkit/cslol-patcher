@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 // do not reorder
+#include <MinHook.h>
+// do not reorder
 #define CSLOL_IMPL
 #include "cslol-api.h"
 
@@ -109,36 +111,15 @@ call_original:
 }
 
 static int patch_CreateFileA() {
-#pragma pack(push, 1)
-    typedef struct _ImportThunk {
-        UINT16 jmp;
-        INT32 rel32;
-        BYTE pad[10];
-    } ImportThunk;
+    MH_STATUS s = MH_Initialize();
+    error_if(s, "Failed to init CreateFileA hook: %s", MH_StatusToString(s));
 
-    typedef struct _ImportTrampoline {
-        BYTE mov_rax[2];
-        UINT64 abs64;
-        BYTE jmp_rax[2];
-        BYTE pad[4];
-    } ImportTrampoline;
-#pragma pack(pop)
+    LPVOID target = NULL;
+    s = MH_CreateHookApiEx(L"KERNEL32.dll", "CreateFileA", &CreateFileA_hook, (LPVOID*)&CreateFileA_original, &target);
+    error_if(s, "Failed to create CreateFileA hook: %s", MH_StatusToString(s));
 
-    LPVOID module = GetModuleHandleW(L"KERNEL32.DLL");
-    error_if(!module || module == INVALID_HANDLE_VALUE, "Failed to get kernel32 module because %x", GetLastError());
-
-    ImportThunk* thunk = (ImportThunk*)GetProcAddress(module, "CreateFileA");
-    error_if(!thunk, "Failed to get CreateFileA import thunk because %x", GetLastError());
-
-    log_info("patching thunk %p from module %p", thunk, module);
-
-    error_if(thunk->jmp != 0x25FF, "CreateFileA import unexpected thunk: %x %x", thunk->jmp, thunk->rel32);
-
-    CreateFileA_original = *(CreateFileA_fnptr*)(thunk->pad + thunk->rel32);
-
-    ImportTrampoline tramp = {{0x48, 0xB8u}, (UINT64)&CreateFileA_hook, {0xFF, 0xE0}};
-    BOOL result = WriteProcessMemory((HANDLE)-1, thunk, &tramp, sizeof(tramp), NULL);
-    error_if(result == 0, "Failed to write import trampoline because: %x", GetLastError());
+    s = MH_EnableHook(target);
+    error_if(s, "Failed to enable CreateFileA hook: %s", MH_StatusToString(s));
 
     return 1;
 }
@@ -268,6 +249,8 @@ __asm__(".section .shared,\"ds\"\n");
 
 static volatile int s_inited __attribute__((section(".shared"))) = {0};
 
+static volatile int s_msg_received __attribute((section(".shared"))) = {0};
+
 static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, 0, {0}};
 
 static int s_log_end __attribute__((section(".shared"))) = {0};
@@ -308,6 +291,8 @@ static int cslol_init_in_process() {
 }
 
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
+    ++s_msg_received;
+    UnhookWindowsHookEx(NULL);
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
