@@ -110,12 +110,46 @@ call_original:
                                 hTemplateFile);
 }
 
+static LPVOID get_proc_address(LPVOID module, const char* func_name) {
+    char* base = (char*)module;
+
+    IMAGE_DOS_HEADER dos_header = {0};
+    ReadProcessMemory((HANDLE)-1, base, &dos_header, sizeof(dos_header), NULL);
+
+    IMAGE_NT_HEADERS64 nt_headers = {0};
+    ReadProcessMemory((HANDLE)-1, base + dos_header.e_lfanew, &nt_headers, sizeof(nt_headers), NULL);
+
+    IMAGE_EXPORT_DIRECTORY export_dir = {0};
+    ReadProcessMemory((HANDLE)-1,
+                      base + nt_headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress,
+                      &export_dir,
+                      sizeof(export_dir),
+                      NULL);
+
+    const DWORD* names_rvas = (const DWORD*)(base + export_dir.AddressOfNames);
+    const DWORD* func_rvas = (const DWORD*)(base + export_dir.AddressOfFunctions);
+    for (DWORD i = 0; i != export_dir.NumberOfFunctions && i != export_dir.NumberOfNames; ++i) {
+        if (names_rvas[i] == 0) continue;
+        if (func_rvas[i] == 0) continue;
+        if (0 != strcmp(func_name, base + names_rvas[i])) continue;
+        return base + func_rvas[i];
+    }
+    return NULL;
+}
+
 static int patch_CreateFileA() {
     MH_STATUS s = MH_Initialize();
     error_if(s, "Failed to init CreateFileA hook: %s", MH_StatusToString(s));
 
-    LPVOID target = NULL;
-    s = MH_CreateHookApiEx(L"KERNEL32.dll", "CreateFileA", &CreateFileA_hook, (LPVOID*)&CreateFileA_original, &target);
+    HMODULE module = GetModuleHandleW(L"Kernel32.dll");
+    error_if(!module, "Failed to find CreateFileA module");
+
+    LPVOID target = (LPVOID)get_proc_address(module, "CreateFileA");
+    error_if(!target, "Failed to find CreateFileA funtion");
+
+    log_info("Hoking CreateFileA %p in module %p", target, module);
+
+    s = MH_CreateHook(target, &CreateFileA_hook, (LPVOID*)&CreateFileA_original);
     error_if(s, "Failed to create CreateFileA hook: %s", MH_StatusToString(s));
 
     s = MH_EnableHook(target);
