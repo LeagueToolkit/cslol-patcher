@@ -303,7 +303,7 @@ CSLOL_API const char* cslol_init() {
 CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     WCHAR buffer[MAX_PATH_WIDE] = {'\\', '\\', '?', '\\'};
     WCHAR* buffer_start = buffer + 4;
-    WCHAR* buffer_end = buffer_start + MAX_PATH_WIDE - 1;
+    WCHAR* buffer_end = buffer + MAX_PATH_WIDE - 1;
 
     // Get full path.
     DWORD length = GetFullPathNameW(prefix, buffer_end - buffer_start, buffer_start, NULL);
@@ -316,7 +316,7 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     // Append \\ to end.
     if (buffer_start[length - 1] != '\\') {
         buffer_start[length++] = '\\';
-        buffer_start[length] = '\0';
+        buffer_start[length] = 0;
     }
 
     // Prepend \\\\?\\ if not there already.
@@ -326,6 +326,9 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     }
 
     memcpy_s((void*)s_config.prefix, sizeof(s_config.prefix), buffer_start, (length + 1) * sizeof(WCHAR));
+
+    DWORD attrib = GetFileAttributesW((LPCWSTR)s_config.prefix);
+    if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) return "Prefix path does not exist";
 
     return NULL;
 }
