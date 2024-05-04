@@ -59,6 +59,9 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
 
     // Only care about reading existing normal files.
     if (lpFileName == NULL) goto call_original;
+
+    log_debug("open: %s", lpFileName);
+
     if (dwDesiredAccess != GENERIC_READ) goto call_original;
     if (dwShareMode != FILE_SHARE_READ) goto call_original;
     if (lpSecurityAttributes != NULL) goto call_original;
@@ -73,12 +76,15 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
 
     WCHAR buffer[MAX_PATH_WIDE];
     LPWSTR dst = buffer;
+    LPWSTR end = buffer + MAX_PATH_WIDE;
 
     // Copy prefix
-    for (LPWSTR src = g_config.prefix; *src; ++dst, ++src) *dst = *src;
+    for (LPWSTR src = g_config.prefix; dst != end && *src; ++dst, ++src) *dst = *src;
+    if (dst == end) goto call_original;
 
     // Copy filename
-    for (LPCSTR src = lpFileName; *src; ++dst, ++src) *dst = *src == '/' ? L'\\' : *src;
+    for (LPCSTR src = lpFileName; dst != end && *src; ++dst, ++src) *dst = *src == '/' ? L'\\' : *src;
+    if (dst == end) goto call_original;
 
     // Add null terminator
     *dst = 0;
@@ -144,10 +150,14 @@ static int patch_CreateFileA() {
     HMODULE module = GetModuleHandleW(L"Kernel32.dll");
     error_if(!module, "Failed to find CreateFileA module");
 
+    char path[MAX_PATH_WIDE] = {0};
+    GetModuleFileNameA(module, path, sizeof(path));
+    log_info("Kernel32 module %p: %s", module, path);
+
     LPVOID target = (LPVOID)get_proc_address(module, "CreateFileA");
     error_if(!target, "Failed to find CreateFileA funtion");
 
-    log_info("Hoking CreateFileA %p in module %p", target, module);
+    log_info("Hoking CreateFileA: %p", target);
 
     s = MH_CreateHook(target, &CreateFileA_hook, (LPVOID*)&CreateFileA_original);
     error_if(s, "Failed to create CreateFileA hook: %s", MH_StatusToString(s));
@@ -326,7 +336,10 @@ static int cslol_init_in_process() {
 
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
     ++s_msg_received;
-    UnhookWindowsHookEx(NULL);
+    PMSG msg = (PMSG)lParam;
+    if (msg && msg->wParam == 0x306c6f6c7363 && msg->message == 0x511) {
+        UnhookWindowsHookEx((HHOOK)msg->lParam);
+    }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
@@ -389,6 +402,7 @@ CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) 
     if (!hook) return "Failed to create hook!";
 
     for (long long t = timeout; t > 0; t -= step) {
+        PostThreadMessageA(tid, 0x511u, 0x306c6f6c7363, (LPARAM)hook);
         Sleep(step);
         if (old_inited != s_inited) {
             UnhookWindowsHookEx(hook);
