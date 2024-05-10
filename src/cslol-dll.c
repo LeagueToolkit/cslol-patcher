@@ -134,11 +134,15 @@ static LPVOID get_proc_address(LPVOID module, const char* func_name) {
 
     const DWORD* names_rvas = (const DWORD*)(base + export_dir.AddressOfNames);
     const DWORD* func_rvas = (const DWORD*)(base + export_dir.AddressOfFunctions);
-    for (DWORD i = 0; i != export_dir.NumberOfFunctions && i != export_dir.NumberOfNames; ++i) {
-        if (names_rvas[i] == 0) continue;
-        if (func_rvas[i] == 0) continue;
-        if (0 != strcmp(func_name, base + names_rvas[i])) continue;
-        return base + func_rvas[i];
+    const USHORT* ordinals = (const USHORT*)(base + export_dir.AddressOfNameOrdinals);
+    for (DWORD i = 0; i != export_dir.NumberOfNames; ++i) {
+        const DWORD name_rva = names_rvas[i];
+        if (0 == name_rva || 0 != strcmp(func_name, base + name_rva)) continue;
+        const USHORT ord = ordinals[i];
+        if (ord < export_dir.Base || ord >= export_dir.NumberOfFunctions) continue;
+        const DWORD func_rva = func_rvas[ord];
+        if (func_rva == 0) continue;
+        return base + func_rva;
     }
     return NULL;
 }
