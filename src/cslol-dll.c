@@ -297,8 +297,6 @@ __asm__(".section .shared,\"ds\"\n");
 
 static volatile int s_inited __attribute__((section(".shared"))) = {0};
 
-static volatile int s_msg_received __attribute((section(".shared"))) = {0};
-
 static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, 0, {0}};
 
 static int s_log_end __attribute__((section(".shared"))) = {0};
@@ -339,7 +337,6 @@ static int cslol_init_in_process() {
 }
 
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
-    ++s_msg_received;
     PMSG msg = (PMSG)lParam;
     if (msg && msg->wParam == 0x306c6f6c7363 && msg->message == 0x511) {
         UnhookWindowsHookEx((HHOOK)msg->lParam);
