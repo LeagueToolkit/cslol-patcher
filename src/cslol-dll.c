@@ -14,7 +14,8 @@
 #define PAGE_SIZE 0x1000
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
-#define LOG_BUFFER 0x10000
+#define LOG_ENTRY_COUNT 16
+#define LOG_ENTRY_SIZE 0x1000
 // #define LOL_WINDOW "VALORANT  "
 // #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
@@ -299,13 +300,11 @@ static volatile int s_inited __attribute__((section(".shared"))) = {0};
 
 static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, 0, {0}};
 
-static int s_log_end __attribute__((section(".shared"))) = {0};
+static size_t s_log_end __attribute__((section(".shared"))) = {0};
 
-static int s_log_start __attribute__((section(".shared"))) = {0};
+static size_t s_log_start __attribute__((section(".shared"))) = {0};
 
-static int g_log_end = {0};
-
-static char s_log_buffer[LOG_BUFFER] __attribute__((section(".shared"))) = {0};
+static char s_log_buffer[LOG_ENTRY_COUNT][LOG_ENTRY_SIZE] __attribute__((section(".shared"))) = {0};
 
 static BOOL g_is_in_process = {0};
 
@@ -411,35 +410,34 @@ CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) 
 }
 
 CSLOL_API char const* cslol_log_pull() {
+    static char buffer[LOG_ENTRY_SIZE];
     if (s_log_start >= s_log_end) {
         return NULL;
     }
-    const char* msg = &s_log_buffer[s_log_start];
-    s_log_start += strlen(msg) + 1;
-    return msg;
+    size_t pos = s_log_start % LOG_ENTRY_COUNT;
+    memcpy_s(buffer, LOG_ENTRY_SIZE, s_log_buffer[pos], LOG_ENTRY_SIZE);
+    buffer[LOG_ENTRY_SIZE - 1] = 0;
+    ++s_log_start;
+    return buffer;
 }
 
 static void write_log(cslol_log_level level, char const* fmt, ...) {
     if (level > g_config.log_level) {
         return;
     }
-    const int pos = g_log_end;
-    const int remain = sizeof(s_log_buffer) - pos;
-    if (remain < 1) {
-        return;
-    }
-
     va_list args;
     va_start(args, fmt);
-    const int ret = vsnprintf(&s_log_buffer[pos], remain, fmt, args);
+    char buffer[LOG_ENTRY_SIZE];
+    const int ret = vsnprintf(buffer, LOG_ENTRY_SIZE - 1, fmt, args);
     va_end(args);
-
-    if (ret <= 0 || ret >= remain) {
+    buffer[LOG_ENTRY_SIZE - 1] = 0;
+    if (ret < 0) {
         return;
     }
 
-    g_log_end = pos + ret + 1;
-    s_log_end = pos + ret + 1;
+    size_t pos = s_log_end % LOG_ENTRY_COUNT;
+    memcpy_s(s_log_buffer[pos], LOG_ENTRY_SIZE, buffer, LOG_ENTRY_SIZE);
+    ++s_log_end;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
