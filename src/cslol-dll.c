@@ -349,31 +349,26 @@ CSLOL_API const char* cslol_init() {
 }
 
 CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
-    WCHAR buffer[MAX_PATH_WIDE] = {'\\', '\\', '?', '\\'};
-    WCHAR* buffer_start = buffer + 4;
-    WCHAR* buffer_end = buffer + MAX_PATH_WIDE - 1;
-
+    WCHAR full[MAX_PATH_WIDE];
     // Get full path.
-    DWORD length = GetFullPathNameW(prefix, buffer_end - buffer_start, buffer_start, NULL);
-    if (length == 0 || length >= (buffer_end - buffer_start)) return "Failed to get full path.";
+    DWORD length = GetFullPathNameW(prefix, MAX_PATH_WIDE, full, NULL);
+    if (length == 0 || length >= MAX_PATH_WIDE) return "Failed to get full path.";
 
-    // Transform directory separators to windows ones.
-    for (WCHAR* i = buffer_start; i != buffer_end; ++i)
-        if (*i == '/') *i = '\\';
+    WCHAR buffer[MAX_PATH_WIDE];
+    int ret = swprintf_s(buffer,
+                         MAX_PATH_WIDE,
+                         L"%s%s%s",
+                         // Prepend \\\\?\\ if not there already.
+                         wcsstr(full, L"\\\\") != 0 ? L"\\\\?\\" : L"",
+                         // path itself
+                         full,
+                         // directory at end
+                         full[length - 1] != L'\\' && full[length - 1] != '/' ? L"\\" : L"");
+    if (ret < 0) return "Prefix path too big!";
+    for (size_t i = 0; i != MAX_PATH_WIDE; ++i)
+        if (buffer[i] == L'/') buffer[i] = L'\\';
 
-    // Append \\ to end.
-    if (buffer_start[length - 1] != '\\') {
-        buffer_start[length++] = '\\';
-        buffer_start[length] = 0;
-    }
-
-    // Prepend \\\\?\\ if not there already.
-    if (0 != memcmp(buffer_start, u"\\\\", 4)) {
-        buffer_start = buffer;
-        length += 4;
-    }
-
-    memcpy_s((void*)s_config.prefix, sizeof(s_config.prefix), buffer_start, (length + 1) * sizeof(WCHAR));
+    memcpy_s((void*)s_config.prefix, MAX_PATH_WIDE, buffer, MAX_PATH_WIDE);
 
     DWORD attrib = GetFileAttributesW((LPCWSTR)s_config.prefix);
     if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) return "Prefix path does not exist";
