@@ -1,16 +1,15 @@
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-// do not reorder
+#include "cslol-win32.h"
+// do not reoder
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// do not reorder
-#include <MinHook.h>
 // do not reorder
 #define CSLOL_IMPL
 #include "cslol-api.h"
 
 #define MAX_PATH_WIDE 1024
+#define MAX_PATH_NAROW 128
 #define PAGE_SIZE 0x1000
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
@@ -40,81 +39,40 @@ static cslol_config_t g_config = {0, 0, {0}};
 
 static void write_log(int level, char const* fmt, ...);
 
-typedef HANDLE(WINAPI* CreateFileA_fnptr)(LPCSTR lpFileName,
-                                          DWORD dwDesiredAccess,
-                                          DWORD dwShareMode,
-                                          LPSECURITY_ATTRIBUTES lpSecurityAttributes,
-                                          DWORD dwCreationDisposition,
-                                          DWORD dwFlagsAndAttributes,
-                                          HANDLE hTemplateFile);
+typedef NTSTATUS (*StringRoutine_t)(PUNICODE_STRING dst, PCANSI_STRING src, BOOLEAN alloc);
 
-static CreateFileA_fnptr CreateFileA_original = NULL;
+static StringRoutine_t StringRoutine_original = NULL;
 
-static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName,
-                                      DWORD dwDesiredAccess,
-                                      DWORD dwShareMode,
-                                      LPSECURITY_ATTRIBUTES lpSecurityAttributes,
-                                      DWORD dwCreationDisposition,
-                                      DWORD dwFlagsAndAttributes,
-                                      HANDLE hTemplateFile) {
+static NTSTATUS StringRoutine_hook(PUNICODE_STRING dst, PCANSI_STRING src, BOOLEAN alloc) {
+    // Consider only valid invocations that can allocate.
+    if (!dst || !src || !alloc || !src->Buffer || src->Length >= MAX_PATH_NAROW) goto call_original;
 
-    // Only care about reading existing normal files.
-    if (lpFileName == NULL) goto call_original;
+    // Copy string on stack, avoid throwing exceptions.
+    char source[MAX_PATH_NAROW];
+    if (!ReadProcessMemory((HANDLE)-1, src->Buffer, source, src->Length, NULL)) goto call_original;
+    source[src->Length] = 0;
 
-    log_debug("open: %s", lpFileName);
+    // Only consider DATA/ relative .wad paths.
+    if (_strnicmp(source, "DATA/", 5) != 0 || !strstr(source, ".wad")) goto call_original;
 
-    if (dwDesiredAccess != GENERIC_READ) goto call_original;
-    if (dwShareMode != FILE_SHARE_READ) goto call_original;
-    if (lpSecurityAttributes != NULL) goto call_original;
-    if (dwCreationDisposition != OPEN_EXISTING) goto call_original;
-    if (dwFlagsAndAttributes != FILE_ATTRIBUTE_NORMAL) goto call_original;
+    // Combine prefix + path in a local buffer.
+    WCHAR buffer[MAX_PATH_NAROW + MAX_PATH_WIDE];
+    swprintf_s(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%s%hs", g_config.prefix, source);
+    for (WCHAR* i = buffer; *i; ++i)
+        if (*i == L'/') *i = L'\\';
 
-    // Only care about .wad files in "DATA/".
-    if (_strnicmp(lpFileName, "DATA/", 5) != 0) goto call_original;
-    if (!strstr(lpFileName, ".wad")) goto call_original;
+    // Ensure this is valid file
+    if (GetFileAttributesW(buffer) == INVALID_FILE_ATTRIBUTES) {
+        log_debug("wad SKIPPED(%lx): %s)", GetLastError(), source);
+        goto call_original;
+    }
+    log_info("wad FIXED: %s", source);
 
-    // TODO: Maybe some sort of logging would be good here?
+    if (!RtlCreateUnicodeString(dst, buffer)) goto call_original;
+    return 0;
 
-    WCHAR buffer[MAX_PATH_WIDE];
-    LPWSTR dst = buffer;
-    LPWSTR end = buffer + MAX_PATH_WIDE;
-
-    // Copy prefix
-    for (LPWSTR src = g_config.prefix; dst != end && *src; ++dst, ++src) *dst = *src;
-    if (dst == end) goto call_original;
-
-    // Copy filename
-    for (LPCSTR src = lpFileName; dst != end && *src; ++dst, ++src) *dst = *src == '/' ? L'\\' : *src;
-    if (dst == end) goto call_original;
-
-    // Add null terminator
-    *dst = 0;
-
-    // Call wide version of CreateFile because user might have prefix in non-ascii path.
-    HANDLE result = CreateFileW(buffer,
-                                dwDesiredAccess,
-                                dwShareMode,
-                                lpSecurityAttributes,
-                                dwCreationDisposition,
-                                dwFlagsAndAttributes,
-                                hTemplateFile);
-
-    // If failed call original.
-    if (result == INVALID_HANDLE_VALUE) goto call_original;
-    log_info("redirected wad: %s", lpFileName);
-
-    // All done...
-    return result;
-
-// Just call original function with same args.
 call_original:
-    return CreateFileA_original(lpFileName,
-                                dwDesiredAccess,
-                                dwShareMode,
-                                lpSecurityAttributes,
-                                dwCreationDisposition,
-                                dwFlagsAndAttributes,
-                                hTemplateFile);
+    return StringRoutine_original(dst, src, alloc);
 }
 
 static LPVOID get_proc_address(LPVOID module, const char* func_name) {
@@ -148,27 +106,34 @@ static LPVOID get_proc_address(LPVOID module, const char* func_name) {
     return NULL;
 }
 
-static int patch_CreateFileA() {
-    MH_STATUS s = MH_Initialize();
-    error_if(s, "Failed to init CreateFileA hook: %s", MH_StatusToString(s));
-
-    HMODULE module = GetModuleHandleW(L"Kernel32.dll");
-    error_if(!module, "Failed to find CreateFileA module");
+static int patch_StringRoutine() {
+    HMODULE module = GetModuleHandleW(L"KernelBase.dll");
+    error_if(!module, "Failed to find KernelBase module");
 
     char path[MAX_PATH_WIDE] = {0};
     GetModuleFileNameA(module, path, sizeof(path));
-    log_info("Kernel32 module %p: %s", module, path);
+    log_info("KernelBase module %p: %s", module, path);
 
-    LPVOID target = (LPVOID)get_proc_address(module, "CreateFileA");
-    error_if(!target, "Failed to find CreateFileA funtion");
+    LPVOID target = (LPVOID)get_proc_address(module, "GetEightBitStringToUnicodeStringRoutine");
+    error_if(!target, "Failed to find StringRoutine funtion");
+    log_info("Reading StringRoutin: %p", target);
 
-    log_info("Hoking CreateFileA: %p", target);
+    DWORD64 data;
+    BOOL result1 = ReadProcessMemory((HANDLE)-1, target, &data, sizeof(data), NULL);
+    error_if(!result1, "Failed to read GetStringRoutine: %lx", GetLastError());
 
-    s = MH_CreateHook(target, &CreateFileA_hook, (LPVOID*)&CreateFileA_original);
-    error_if(s, "Failed to create CreateFileA hook: %s", MH_StatusToString(s));
+    // mov rax, [offset] ; ret
+    void* fnptr = (char*)target + 7 + (int32_t)(uint32_t)(data >> 24);
+    log_info("Hooking StringRoutinPtr: %p", fnptr);
+    error_if(((data & 0xff00000000ffffffull) != 0xc300000000058b48ull), "Failed to parse GetStringRoutine: %llx", data);
 
-    s = MH_EnableHook(target);
-    error_if(s, "Failed to enable CreateFileA hook: %s", MH_StatusToString(s));
+    BOOL result2 = ReadProcessMemory((HANDLE)-1, fnptr, &StringRoutine_original, sizeof(StringRoutine_original), NULL);
+    error_if(!result2, "Failed to read StringRoutinPtr %p: %lx", fnptr, GetLastError());
+    error_if(!StringRoutine_original, "FIXME: StringRoutine not set yet?");
+
+    void* hookptr = &StringRoutine_hook;
+    BOOL result3 = WriteProcessMemory((HANDLE)-1, fnptr, &hookptr, sizeof(hookptr), NULL);
+    error_if(!result3, "Failed to write StringRoutinPtr %p: %lx", fnptr, GetLastError());
 
     return 1;
 }
@@ -328,7 +293,7 @@ static int cslol_init_in_process() {
 
     // Patch CreateFileA for filesystem overlay effect.
     if (!(g_config.flags & CSLOL_HOOK_DISABLE_FILE)) {
-        error_if(!patch_CreateFileA(), "Failed to patch CreateFileA!");
+        error_if(!patch_StringRoutine(), "Failed to patch CreateFileA!");
     }
 
     log_info("Init done!");
