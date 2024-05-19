@@ -173,16 +173,22 @@ static int patch_CreateFileA() {
     return 1;
 }
 
-// Check if CRYPTO_free will return into int_rsa_verify.
-extern SIZE_T CDECL CRYPTO_free_check(LPVOID ptr, LPVOID* ret);
-SIZE_T CDECL CRYPTO_free_check(LPVOID ptr, LPVOID* ret) {
+// Set int_rsa_verify return value to true.
+__attribute__((naked)) static void CRYPTO_free_hook_tail(LPVOID ptr) { __asm__("or $1, %rbx\n\tretn\n\t"); }
+
+// (Ab)use CRYPTO_free to swap out return value of int_rsa_verify function.
+// We do this because pacman integrity checks code pages.
+void CRYPTO_free_hook(LPVOID ptr) {
+    // Get return address so we can filter only necessary callsite.
+    LPVOID ret = __builtin_return_address(0);
+
     // Nothing to do here.
-    if (ptr == NULL) return 0;
+    if (ptr == NULL) return;
 
     // Free pointer.
     free(ptr);
 
-    // Try to read instructions at address.
+    // Try to read instructions at address, use RPM to avoid throwing exceptions.
     SIZE_T ret_insn = 0;
     BOOL result = ReadProcessMemory((HANDLE)-1, (LPCVOID)ret, &ret_insn, sizeof(ret_insn), NULL);
 
@@ -190,31 +196,12 @@ SIZE_T CDECL CRYPTO_free_check(LPVOID ptr, LPVOID* ret) {
     // 48 8b 7c 24 70          mov    rdi, QWORD PTR [rsp+0x70]
     // 8b c3                   mov    eax, ebx
     // 48                      rex.W
-    return result != 0 && ret_insn == 0x48C38B70247C8B48;
+    if (result != 0 && ret_insn == 0x48C38B70247C8B48) {
+        // Call a naked function with musttail instead of asm to avoid fucking with call frames.
+        // Musttail will force compiler to generate jmp instead of retn.
+        __attribute__((musttail)) return CRYPTO_free_hook_tail(NULL);
+    }
 }
-
-// (Ab)use CRYPTO_free to swap out return value of int_rsa_verify function.
-extern void CRYPTO_free_hook();
-__asm__(
-    ".intel_syntax\n"
-    ".section .text\n"
-    ".global CRYPTO_free_check\n"
-    ".global CRYPTO_free_hook\n"
-    "CRYPTO_free_hook:\n\t"
-    // put return address in second argument
-    "mov rdx, [rsp] \n\t"
-    // adjust stack by 8 to align for call
-    "sub rsp, 8 \n\t"
-    // call hook func to check if we need to patch
-    "call CRYPTO_free_check \n\t"
-    // adjust stack back
-    "add rsp, 8 \n\t"
-    // if hook func returns 1, set rbx to 1, optimized to 1 instruction
-    "or rbx, rax \n\t"
-    // done
-    "retn\n"
-    //
-);
 
 // Scan image on disk for pattern.
 static UINT_PTR find_in_image(LPVOID module, BYTE* what, SIZE_T size, SIZE_T step) {
@@ -392,6 +379,9 @@ CSLOL_API unsigned cslol_find() {
 }
 
 CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) {
+    // Inject ourselves with classic SetWindowsHookExA
+    // NOTE: this will only work with signed dll when vanguard is turned on
+    //       that's why for releases we need to sign our dlls with valid certificate
     const int old_inited = s_inited;
     HHOOK hook = SetWindowsHookExA(WH_GETMESSAGE, &cslol_msg_hookproc, g_instance, tid);
     if (!hook) return "Failed to create hook!";
