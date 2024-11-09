@@ -37,6 +37,8 @@ int main() {
         }
     }
 
+    cslol_set_log_level(CSLOL_LOG_DEBUG);
+
     // Main loop.
     while (1) {
         // Scan for lol.

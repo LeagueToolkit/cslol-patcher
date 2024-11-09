@@ -31,34 +31,46 @@ typedef enum cslol_hook_flags {
 
 typedef enum cslol_log_level {
     CSLOL_LOG_ERROR = 0,
-    CSLOL_LOG_INFO = 0x10,
-    CSLOL_LOG_DEBUG = 0x20,
+    CSLOL_LOG_WARN = 0x10,
+    CSLOL_LOG_INFO = 0x40,
+    CSLOL_LOG_DEBUG = 0x80,
     CSLOL_LOG_ALL = 0x1000,
 } cslol_log_level;
 
+#ifndef CSLOL_API_NO_COMPAT
+#    define cslol_api_msg_hookproc cslol_msg_hookproc
+#    define cslol_api_init cslol_init
+#    define cslol_api_set_prefix cslol_set_config
+#    define cslol_api_set_flags cslol_set_flags
+#    define cslol_api_set_log_level cslol_set_log_level
+#    define cslol_api_log_pull cslol_log_pull
+#    define cslol_api_find_tid cslol_find
+#    define cslol_api_hook cslol_hook
+#endif
+
 // Msg proc used for injection.
-CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam);
+CSLOL_API intptr_t cslol_api_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam);
 
 // Initialize IPC, returns error if any.
-CSLOL_API const char* cslol_init();
+CSLOL_API const char* cslol_api_init();
 
 // Sets prefix folder, returns error if any.
-CSLOL_API const char* cslol_set_config(const char16_t* prefix);
+CSLOL_API const char* cslol_api_set_prefix(const char16_t* prefix);
 
 // Sets flags, return error if any.
-CSLOL_API const char* cslol_set_flags(cslol_hook_flags flags);
+CSLOL_API const char* cslol_api_set_flags(cslol_hook_flags flags);
 
 // Set log level, return error if any.
-CSLOL_API const char* cslol_set_log_level(cslol_log_level level);
+CSLOL_API const char* cslol_api_set_log_level(cslol_log_level level);
 
 // Pull log message if any.
-CSLOL_API const char* cslol_log_pull();
+CSLOL_API const char* cslol_api_log_pull();
 
 // Find thread id of running lol instance.
-CSLOL_API unsigned cslol_find();
+CSLOL_API unsigned cslol_api_find_tid();
 
 // Hook, return error if any.
-CSLOL_API const char* cslol_hook(unsigned tid, unsigned post_iters, unsigned event_iters);
+CSLOL_API const char* cslol_api_hook(unsigned tid, unsigned post_iters, unsigned event_iters);
 
 #ifdef __cplusplus
 }
