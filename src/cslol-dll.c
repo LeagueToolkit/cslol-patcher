@@ -399,10 +399,7 @@ static const char* open_log_for_tail(const wchar_t* path) {
 }
 
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
-    PMSG msg = (PMSG)lParam;
-    if (msg && msg->wParam == 0x306c6f6c7363 && msg->message == 0x511) {
-        UnhookWindowsHookEx((HHOOK)msg->lParam);
-    }
+    __asm__ __volatile__("nop" : : "g"((char*)(lParam)) : "memory");
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
