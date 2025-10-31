@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 // do not reorder
+#include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,9 @@
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
 #define LOG_ENTRY_COUNT 16
-#define LOG_ENTRY_SIZE 0x1000
+#define LOG_ENTRY_SIZE 0x800
+#define PIPE_NAME L"\\\\.\\pipe\\cslol-patcher-pipe"
+#define EOL_TIMESTAMP 1763103600  // November 14th 2025
 // #define LOL_WINDOW "VALORANT  "
 // #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
@@ -34,7 +37,13 @@ typedef struct cslol_config_s {
     cslol_hook_flags flags;
     cslol_log_level log_level;
     WCHAR prefix[MAX_PATH_WIDE];
+    WCHAR log_file[MAX_PATH_WIDE];
 } cslol_config_t;
+
+typedef struct cslol_msg_s {
+    cslol_config_t config;
+    ULONG64 checksum;
+} cslol_msg_t;
 
 static cslol_config_t g_config = {0, 0, {0}};
 
@@ -281,32 +290,73 @@ static int patch_CRYPTO_free() {
     return 1;
 }
 
-__asm__(".section .shared,\"ds\"\n");
+// Get build timestamp.
+static BOOL get_module_timestamp() {
+    HMODULE base = GetModuleHandleA(LOL_EXE);
+    if (!base) return 0;
 
-static volatile int s_inited __attribute__((section(".shared"))) = {0};
+    __try {
+        IMAGE_DOS_HEADER* dosHeader = (IMAGE_DOS_HEADER*)(char*)base;
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return 1;
 
-static volatile cslol_config_t s_config __attribute__((section(".shared"))) = {0, 0, {0}};
+        IMAGE_NT_HEADERS* ntHeaders = (IMAGE_NT_HEADERS*)((char*)base + dosHeader->e_lfanew);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return 2;
 
-static size_t s_log_end __attribute__((section(".shared"))) = {0};
-
-static size_t s_log_start __attribute__((section(".shared"))) = {0};
-
-static char s_log_buffer[LOG_ENTRY_COUNT][LOG_ENTRY_SIZE] __attribute__((section(".shared"))) = {0};
+        return ntHeaders->FileHeader.TimeDateStamp;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 4;
+    }
+}
 
 static BOOL g_is_in_process = {0};
 
 static HINSTANCE g_instance = NULL;
 
+static FILE* g_log = NULL;
+
 static int cslol_init_in_process() {
-    s_inited++;
-    s_log_end = 0;
-    s_log_start = 0;
     g_is_in_process = 1;
 
-    // Copy in config.
-    memcpy_s(&g_config, sizeof(g_config), (const void*)&s_config, sizeof(s_config));
+    // Fetch config from named pipe.
+    {
+        HANDLE pipe = CreateFileW(PIPE_NAME, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (!pipe) {
+            DWORD error = GetLastError();
+            log_error("Failed to open pipe because: %08x!", error);
+            return 0;
+        }
+
+        cslol_msg_t msg = {0};
+        DWORD readed = 0;
+        if (!ReadFile(pipe, &msg, sizeof(msg), &readed, NULL)) {
+            DWORD error = GetLastError();
+            log_error("Failed to read pipe because: %08x!", error);
+            CloseHandle(pipe);
+            return 0;
+        }
+
+        msg.config.prefix[(sizeof(msg.config.prefix) / sizeof(msg.config.prefix[0])) - 1] = 0;
+        msg.config.log_file[(sizeof(msg.config.log_file) / sizeof(msg.config.log_file[0])) - 1] = 0;
+        g_config = msg.config;
+
+        CloseHandle(pipe);
+    }
+
+    // Open log
+    {
+        FILE* log = _wfsopen(g_config.log_file, L"ab+", _SH_DENYNO);
+        if (!log) {
+            log_error("Failed to open log file because: %d, log: '%ls'", errno, g_config.log_file);
+            return 0;
+        }
+        g_log = log;
+    }
 
     log_info("Init in process!");
+
+    DWORD timestamp = get_module_timestamp();
+    error_if(timestamp <= 0x5E2D1F00, "Failed to get valid timestamp: %08X", timestamp);
+    error_if(timestamp > EOL_TIMESTAMP, "End of life reached, please update: %08X", timestamp);
 
     // Pach int_rsa_verify via CRYPTO_free before patching CreateFileA.
     if (!(g_config.flags & CSLOL_HOOK_DISABLE_VERIFY)) {
@@ -322,6 +372,32 @@ static int cslol_init_in_process() {
     return 1;
 }
 
+static const char* open_log_for_tail(const wchar_t* path) {
+    if (g_log && wcscmp(g_config.log_file, path) == 0) return NULL;
+
+    if (g_log) {
+        fclose(g_log);
+        g_log = NULL;
+    }
+    g_config.log_file[0] = 0;
+
+    FILE* log = _wfsopen(path, L"rb", _SH_DENYNO);
+    if (!log) {
+        log = _wfsopen(path, L"a+b", _SH_DENYNO);
+        if (!log) return "Failed to create log file.";
+        fclose(log);
+
+        log = _wfsopen(path, L"rb", _SH_DENYNO);
+        if (!log) return "Failed to open log file.";
+    }
+
+    fseek(log, 0, SEEK_END);
+    g_log = log;
+    wcscpy_s(g_config.log_file, MAX_PATH_WIDE, path);
+
+    return NULL;
+}
+
 CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lParam) {
     PMSG msg = (PMSG)lParam;
     if (msg && msg->wParam == 0x306c6f6c7363 && msg->message == 0x511) {
@@ -330,9 +406,7 @@ CSLOL_API intptr_t cslol_msg_hookproc(int code, uintptr_t wParam, intptr_t lPara
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
-CSLOL_API const char* cslol_init() {
-    return NULL;
-}
+CSLOL_API const char* cslol_init() { return NULL; }
 
 CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     WCHAR full[MAX_PATH_WIDE];
@@ -354,21 +428,21 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     for (size_t i = 0; i != MAX_PATH_WIDE; ++i)
         if (buffer[i] == L'/') buffer[i] = L'\\';
 
-    memcpy_s((void*)s_config.prefix, MAX_PATH_WIDE, buffer, MAX_PATH_WIDE);
+    memcpy_s((void*)g_config.prefix, MAX_PATH_WIDE, buffer, MAX_PATH_WIDE);
 
-    DWORD attrib = GetFileAttributesW((LPCWSTR)s_config.prefix);
+    DWORD attrib = GetFileAttributesW((LPCWSTR)g_config.prefix);
     if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) return "Prefix path does not exist";
 
     return NULL;
 }
 
 CSLOL_API const char* cslol_set_flags(cslol_hook_flags flags) {
-    s_config.flags = flags;
+    g_config.flags = flags;
     return NULL;
 }
 
 CSLOL_API const char* cslol_set_log_level(cslol_log_level level) {
-    s_config.log_level = level;
+    g_config.log_level = level;
     return NULL;
 }
 
@@ -379,55 +453,91 @@ CSLOL_API unsigned cslol_find() {
 }
 
 CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) {
+    // Open log.
+    {
+        WCHAR log[MAX_PATH_WIDE + 16];
+        wsprintfW(log, L"%slog.txt", g_config.prefix);
+        const char* error = open_log_for_tail(log);
+        if (error) return error;
+    }
+
+    // Setup the pipe.
+    HANDLE pipe = CreateNamedPipeW(PIPE_NAME,
+                                   PIPE_ACCESS_OUTBOUND,
+                                   PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                   1,
+                                   4096,
+                                   4096,
+                                   0,
+                                   NULL);
+
     // Inject ourselves with classic SetWindowsHookExA
     // NOTE: this will only work with signed dll when vanguard is turned on
     //       that's why for releases we need to sign our dlls with valid certificate
-    const int old_inited = s_inited;
     HHOOK hook = SetWindowsHookExA(WH_GETMESSAGE, &cslol_msg_hookproc, g_instance, tid);
-    if (!hook) return "Failed to create hook!";
-
-    for (long long t = timeout; t > 0; t -= step) {
-        PostThreadMessageA(tid, 0x511u, 0x306c6f6c7363, (LPARAM)hook);
-        Sleep(step);
-        if (old_inited != s_inited) {
-            UnhookWindowsHookEx(hook);
-            return NULL;
-        }
+    const char* error = NULL;
+    if (!hook) {
+        error = "Failed to create hook!";
+        goto done;
     }
 
-    UnhookWindowsHookEx(hook);
-    return "Timeout out while waiting for init!";
+    BOOL connected = ConnectNamedPipe(pipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+    if (!connected) {
+        error = "Failed to connect to named pipe!";
+        goto done;
+    }
+
+    cslol_msg_t msg = {0};
+    msg.config = g_config;
+    msg.checksum = 0x67736d6c6f6c7363ull;
+
+    DWORD written;
+    if (!WriteFile(pipe, &msg, sizeof(msg), &written, NULL)) {
+        error = "Failed to write config to pipe!";
+        goto done;
+    }
+
+    if (!FlushFileBuffers(pipe)) {
+        error = "Failed to flush pipe!";
+        goto done;
+    }
+
+done:
+    if (pipe && pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+    if (hook) UnhookWindowsHookEx(hook);
+    return error;
 }
 
 CSLOL_API char const* cslol_log_pull() {
     static char buffer[LOG_ENTRY_SIZE];
-    if (s_log_start >= s_log_end) {
-        return NULL;
-    }
-    size_t pos = s_log_start % LOG_ENTRY_COUNT;
-    memcpy_s(buffer, LOG_ENTRY_SIZE, s_log_buffer[pos], LOG_ENTRY_SIZE);
-    buffer[LOG_ENTRY_SIZE - 1] = 0;
-    ++s_log_start;
+    if (!g_log || !fgets(buffer, LOG_ENTRY_SIZE, g_log)) return NULL;
+    int len = strlen(buffer);
+    if (!len) return NULL;
+    if (buffer[len - 1] == '\n') buffer[len - 1] = '\0';
     return buffer;
 }
 
 static void write_log(cslol_log_level level, char const* fmt, ...) {
-    if (level > g_config.log_level) {
+    if (level > g_config.log_level || (!g_log && level > CSLOL_LOG_ERROR)) {
         return;
     }
     va_list args;
     va_start(args, fmt);
     char buffer[LOG_ENTRY_SIZE];
-    const int ret = vsnprintf(buffer, LOG_ENTRY_SIZE - 1, fmt, args);
+    const int ret = vsnprintf(buffer, LOG_ENTRY_SIZE - 2, fmt, args);
     va_end(args);
-    buffer[LOG_ENTRY_SIZE - 1] = 0;
-    if (ret < 0) {
+    if (ret < 0 || ret >= LOG_ENTRY_SIZE - 2) {
         return;
     }
+    buffer[ret] = '\n';
+    buffer[ret + 1] = '\0';
 
-    size_t pos = s_log_end % LOG_ENTRY_COUNT;
-    memcpy_s(s_log_buffer[pos], LOG_ENTRY_SIZE, buffer, LOG_ENTRY_SIZE);
-    ++s_log_end;
+    if (g_log) {
+        fwrite(buffer, 1, ret + 1, g_log);
+        fflush(g_log);
+    } else {
+        MessageBoxA(NULL, buffer, "cslol-patcher error", MB_OK | MB_ICONERROR);
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
@@ -435,9 +545,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
         g_instance = inst;
         if (GetModuleHandleA(LOL_EXE) == GetModuleHandleA(NULL)) {
-            WCHAR path[MAX_PATH_WIDE];
-            GetModuleFileNameW(g_instance, path, sizeof(path));
-            LoadLibraryW(path);
+            // Pin ourselfs so we persist even after a hook.
+            HMODULE dummy = NULL;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                               (PCWSTR)(void*)&DllMain,
+                               &dummy);
             cslol_init_in_process();
         }
     }
