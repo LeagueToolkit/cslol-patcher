@@ -27,6 +27,7 @@ int main() {
     }
 
     // cslol_set_flags(CSLOL_HOOK_DISABLE_ALL);
+    cslol_set_log_level(CSLOL_LOG_ALL);
 
     // Set prefix.
     {

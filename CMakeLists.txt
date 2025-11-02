@@ -5,31 +5,28 @@ project(cslol-patcher LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-include(FetchContent)
-
-FetchContent_Declare(
-    minhook
-    GIT_REPOSITORY https://github.com/TsudaKageyu/minhook
-    GIT_TAG        f5485b8454544c2f034c78f8f127c1d03dea3636
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-)
-FetchContent_GetProperties(minhook)
-if(NOT minhook_POPULATED)
-    FetchContent_Populate(minhook)
-    add_library(minhook STATIC
-        ${minhook_SOURCE_DIR}/src/hde/hde32.c
-        ${minhook_SOURCE_DIR}/src/hde/hde64.c
-        ${minhook_SOURCE_DIR}/src/buffer.c
-        ${minhook_SOURCE_DIR}/src/hook.c
-        ${minhook_SOURCE_DIR}/src/trampoline.c
-    )
-    target_include_directories(minhook PRIVATE ${minhook_SOURCE_DIR}/src)
-    target_include_directories(minhook PUBLIC ${minhook_SOURCE_DIR}/include)
-endif()
-
 add_library(cslol-dll SHARED src/cslol-api.h src/cslol-dll.c)
 target_link_libraries(cslol-dll PRIVATE minhook)
+target_compile_options(
+    cslol-dll PRIVATE
+    /GS-
+)
+target_compile_definitions(
+    cslol-dll PRIVATE
+    -D_NO_CRT_STDIO_INLINE=1
+    -D_CRT_SECURE_NO_WARNINGS=1
+)
+target_link_options(
+    cslol-dll PRIVATE
+    /Brepro
+    /nodefaultlib
+    /noentry
+    /subsystem:WINDOWS
+)
+target_link_libraries(cslol-dll PRIVATE ntdll.lib user32.lib kernel32.lib)
+
+add_subdirectory(ntdllcrt)
+target_link_libraries(cslol-dll PRIVATE ntdllcrt)
 
 add_executable(cslol-inj src/cslol-inj.c)
 target_link_libraries(cslol-inj PRIVATE cslol-dll)

@@ -1,12 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 // do not reorder
-#include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// do not reorder
-#include <MinHook.h>
 // do not reorder
 #define CSLOL_IMPL
 #include "cslol-api.h"
@@ -16,7 +13,7 @@
 #define LOL_WINDOW "League of Legends (TM) Client"
 #define LOL_EXE "League of Legends.exe"
 #define LOG_ENTRY_COUNT 16
-#define LOG_ENTRY_SIZE 0x800
+#define LOG_ENTRY_SIZE 512
 #define PIPE_NAME L"\\\\.\\pipe\\cslol-patcher-pipe"
 #define EOL_TIMESTAMP 1763103600  // November 14th 2025
 // #define LOL_WINDOW "VALORANT  "
@@ -158,9 +155,6 @@ static LPVOID get_proc_address(LPVOID module, const char* func_name) {
 }
 
 static int patch_CreateFileA() {
-    MH_STATUS s = MH_Initialize();
-    error_if(s, "Failed to init CreateFileA hook: %s", MH_StatusToString(s));
-
     HMODULE module = GetModuleHandleW(L"Kernel32.dll");
     error_if(!module, "Failed to find CreateFileA module");
 
@@ -170,14 +164,43 @@ static int patch_CreateFileA() {
 
     LPVOID target = (LPVOID)get_proc_address(module, "CreateFileA");
     error_if(!target, "Failed to find CreateFileA funtion");
+    log_info("CreateFileA thunk: %p", target);
 
-    log_info("Hoking CreateFileA: %p", target);
+    __declspec(align(16)) BYTE data[16] = {0};
+    BOOL res = ReadProcessMemory((HANDLE)(LONG_PTR)-1, target, data, sizeof(data), NULL);
+    error_if(!res, "Failed to read CreateFileA bytes: ", GetLastError());
+    log_info("CreateFileA bytes: %016llx%016llx", ((unsigned long long*)data)[1], ((unsigned long long*)data)[0]);
 
-    s = MH_CreateHook(target, &CreateFileA_hook, (LPVOID*)&CreateFileA_original);
-    error_if(s, "Failed to create CreateFileA hook: %s", MH_StatusToString(s));
+    PVOID* import_ptr;
+    if (data[0] == 0xFF && data[1] == 0x25) {
+        import_ptr = (PVOID*)(((PBYTE)target + 6) + *(LONG32 __unaligned*)(&data[2]));
+    } else if (data[1] == 0xFF && data[2] == 0x25) {
+        import_ptr = (PVOID*)(((PBYTE)target + 7) + *(LONG32 __unaligned*)(&data[3]));
+    } else {
+        error_if(FALSE, "CreateFileA is not a thunk (old windows version?)");
+    }
 
-    s = MH_EnableHook(target);
-    error_if(s, "Failed to enable CreateFileA hook: %s", MH_StatusToString(s));
+    PVOID original = NULL;
+    res = ReadProcessMemory((HANDLE)(LONG_PTR)-1, import_ptr, &original, sizeof(original), NULL);
+    error_if(!res, "Failed to read import ptr: %x", GetLastError());
+    log_info("CreateFileA original: [%p] -> %p", import_ptr, original);
+    CreateFileA_original = (CreateFileA_fnptr)original;
+
+    // Create hook directly in import thunk.
+    data[0] = 0x90;
+    data[1] = 0x48;
+    data[2] = 0xB8;
+    *(ULONG_PTR __unaligned*)(data + 3) = (ULONG_PTR)(PVOID)&CreateFileA_hook;
+    data[11] = 0xFF;
+    data[12] = 0xE0;
+
+    // Protect RWX and then write in place.
+    DWORD old = {};
+    res = VirtualProtect(target, sizeof(data), PAGE_EXECUTE_READWRITE, &old);
+    error_if(!res, "Failed to rwx protect CreateFileA bytes: ", GetLastError());
+    res = WriteProcessMemory((HANDLE)(LONG_PTR)-1, target, data, sizeof(data), NULL);
+    error_if(!res, "Failed to write CreateFileA bytes: ", GetLastError());
+    VirtualProtect(target, sizeof(data), old, &old);
 
     return 1;
 }
@@ -195,7 +218,7 @@ void CRYPTO_free_hook(LPVOID ptr) {
     if (ptr == NULL) return;
 
     // Free pointer.
-    free(ptr);
+    HeapFree(GetProcessHeap(), 0, ptr);
 
     // Try to read instructions at address, use RPM to avoid throwing exceptions.
     SIZE_T ret_insn = 0;
@@ -230,12 +253,11 @@ static UINT_PTR find_in_image(LPVOID module, BYTE* what, SIZE_T size, SIZE_T ste
     IMAGE_NT_HEADERS64 nt_headers = {0};
     IMAGE_SECTION_HEADER sections[64] = {0};
     if (ReadFile(file, buffer, PAGE_SIZE, NULL, NULL)) {
-        memcpy_s(&dos_header, sizeof(dos_header), buffer, sizeof(dos_header));
-        memcpy_s(&nt_headers, sizeof(nt_headers), buffer + dos_header.e_lfanew, sizeof(nt_headers));
-        memcpy_s(&sections,
-                 sizeof(sections),
-                 buffer + dos_header.e_lfanew + 0x18 + nt_headers.FileHeader.SizeOfOptionalHeader,
-                 sizeof(sections[0]) * nt_headers.FileHeader.NumberOfSections);
+        memcpy(&dos_header, buffer, sizeof(dos_header));
+        memcpy(&nt_headers, buffer + dos_header.e_lfanew, sizeof(nt_headers));
+        memcpy(&sections,
+               buffer + dos_header.e_lfanew + 0x18 + nt_headers.FileHeader.SizeOfOptionalHeader,
+               sizeof(sections[0]) * nt_headers.FileHeader.NumberOfSections);
     }
 
     SIZE_T page = 0;
@@ -248,7 +270,7 @@ static UINT_PTR find_in_image(LPVOID module, BYTE* what, SIZE_T size, SIZE_T ste
                 goto done;
             }
         }
-        memcpy_s(buffer, PAGE_SIZE, buffer + PAGE_SIZE, PAGE_SIZE);
+        memcpy(buffer, buffer + PAGE_SIZE, PAGE_SIZE);
         page += PAGE_SIZE;
     }
 
@@ -292,7 +314,7 @@ static int patch_CRYPTO_free() {
 
 // Get build timestamp.
 static BOOL get_module_timestamp() {
-    HMODULE base = GetModuleHandleA(LOL_EXE);
+    HMODULE base = GetModuleHandleA(NULL);
     if (!base) return 0;
 
     __try {
@@ -312,7 +334,7 @@ static BOOL g_is_in_process = {0};
 
 static HINSTANCE g_instance = NULL;
 
-static FILE* g_log = NULL;
+static HANDLE g_log = NULL;
 
 static int cslol_init_in_process() {
     g_is_in_process = 1;
@@ -344,9 +366,15 @@ static int cslol_init_in_process() {
 
     // Open log
     {
-        FILE* log = _wfsopen(g_config.log_file, L"ab+", _SH_DENYNO);
-        if (!log) {
-            log_error("Failed to open log file because: %d, log: '%ls'", errno, g_config.log_file);
+        HANDLE log = CreateFileW(g_config.log_file,
+                                 FILE_APPEND_DATA,
+                                 FILE_SHARE_DELETE | FILE_SHARE_WRITE | FILE_SHARE_READ,
+                                 NULL,
+                                 OPEN_ALWAYS,
+                                 FILE_FLAG_WRITE_THROUGH,
+                                 NULL);
+        if (!log || log == INVALID_HANDLE_VALUE) {
+            log_error("Failed to open log file because: %d, log: '%ls'", GetLastError(), g_config.log_file);
             return 0;
         }
         g_log = log;
@@ -372,27 +400,26 @@ static int cslol_init_in_process() {
     return 1;
 }
 
-static const char* open_log_for_tail(const wchar_t* path) {
+static const char* open_log_for_tail(PCWSTR path) {
     if (g_log && wcscmp(g_config.log_file, path) == 0) return NULL;
 
     if (g_log) {
-        fclose(g_log);
+        CloseHandle(g_log);
         g_log = NULL;
     }
     g_config.log_file[0] = 0;
 
-    FILE* log = _wfsopen(path, L"rb", _SH_DENYNO);
-    if (!log) {
-        log = _wfsopen(path, L"a+b", _SH_DENYNO);
-        if (!log) return "Failed to create log file.";
-        fclose(log);
+    g_log = CreateFileW(path,
+                        GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL,
+                        OPEN_ALWAYS,
+                        0,
+                        NULL);
+    if (g_log == INVALID_HANDLE_VALUE) g_log = NULL;
 
-        log = _wfsopen(path, L"rb", _SH_DENYNO);
-        if (!log) return "Failed to open log file.";
-    }
-
-    fseek(log, 0, SEEK_END);
-    g_log = log;
+    if (!g_log) return "Failed to open log file.";
+    SetFilePointer(g_log, 0, NULL, FILE_END);
     wcscpy_s(g_config.log_file, MAX_PATH_WIDE, path);
 
     return NULL;
@@ -425,7 +452,7 @@ CSLOL_API const char* cslol_set_config(const char16_t* prefix) {
     for (size_t i = 0; i != MAX_PATH_WIDE; ++i)
         if (buffer[i] == L'/') buffer[i] = L'\\';
 
-    memcpy_s((void*)g_config.prefix, MAX_PATH_WIDE, buffer, MAX_PATH_WIDE);
+    memcpy((void*)g_config.prefix, buffer, MAX_PATH_WIDE);
 
     DWORD attrib = GetFileAttributesW((LPCWSTR)g_config.prefix);
     if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) return "Prefix path does not exist";
@@ -453,7 +480,7 @@ CSLOL_API const char* cslol_hook(unsigned tid, unsigned timeout, unsigned step) 
     // Open log.
     {
         WCHAR log[MAX_PATH_WIDE + 16];
-        wsprintfW(log, L"%slog.txt", g_config.prefix);
+        swprintf_s(log, MAX_PATH_WIDE + 16, L"%slog.txt", g_config.prefix);
         const char* error = open_log_for_tail(log);
         if (error) return error;
     }
@@ -506,12 +533,35 @@ done:
 }
 
 CSLOL_API char const* cslol_log_pull() {
-    static char buffer[LOG_ENTRY_SIZE];
-    if (!g_log || !fgets(buffer, LOG_ENTRY_SIZE, g_log)) return NULL;
-    int len = strlen(buffer);
-    if (!len) return NULL;
-    if (buffer[len - 1] == '\n') buffer[len - 1] = '\0';
-    return buffer;
+    static char buffer[LOG_ENTRY_SIZE + 1] = {0};
+    static int nxt = 0;
+    static int end = 0;
+
+    // shift already consumed data
+    if (nxt > 0) {
+        memmove(buffer, buffer + nxt, end - nxt);
+        end -= nxt;
+        nxt = 0;
+    }
+
+    // re-fill if possible
+    if (end < LOG_ENTRY_SIZE) {
+        DWORD readed = 0;
+        if (!ReadFile(g_log, buffer + end, LOG_ENTRY_SIZE - end, &readed, NULL)) readed = 0;
+        end += readed;
+        buffer[end] = 0;
+    }
+
+    // we have some data
+    if (end > 0) {
+        int endline = 0;
+        while (endline < end && buffer[endline] != '\n') endline += 1;
+        buffer[endline] = 0;
+        nxt = endline + (endline < end ? 1 : 0);
+        return buffer;
+    }
+
+    return NULL;
 }
 
 static void write_log(cslol_log_level level, char const* fmt, ...) {
@@ -521,7 +571,7 @@ static void write_log(cslol_log_level level, char const* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     char buffer[LOG_ENTRY_SIZE];
-    const int ret = vsnprintf(buffer, LOG_ENTRY_SIZE - 2, fmt, args);
+    const int ret = _vsnprintf(buffer, LOG_ENTRY_SIZE - 2, fmt, args);
     va_end(args);
     if (ret < 0 || ret >= LOG_ENTRY_SIZE - 2) {
         return;
@@ -530,28 +580,38 @@ static void write_log(cslol_log_level level, char const* fmt, ...) {
     buffer[ret + 1] = '\0';
 
     if (g_log) {
-        fwrite(buffer, 1, ret + 1, g_log);
-        fflush(g_log);
+        WriteFile(g_log, buffer, ret + 1, NULL, NULL);
     } else {
         MessageBoxA(NULL, buffer, "cslol-patcher error", MB_OK | MB_ICONERROR);
     }
 }
 
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(inst);
+static volatile ULONG64 loaded = 0;
+extern IMAGE_DOS_HEADER __ImageBase;
+extern long LdrAddRefDll(ULONG Flags, PVOID BaseAddress);
+
+VOID tls_callback(PVOID inst, DWORD reason, PVOID reserved) {
+    if (loaded++ == 0) {
+        // Pin ourselves ASAP, so we don't get unloaded if windows hook drops.
+        LdrAddRefDll(GET_MODULE_HANDLE_EX_FLAG_PIN, (PVOID)&__ImageBase);
+
         g_instance = inst;
         if (GetModuleHandleA(LOL_EXE) == GetModuleHandleA(NULL)) {
             // Pin ourselfs so we persist even after a hook.
-            HMODULE dummy = NULL;
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                               (PCWSTR)(void*)&DllMain,
-                               &dummy);
             cslol_init_in_process();
         }
     }
-    if (reason == DLL_PROCESS_DETACH && g_is_in_process) {
-        log_info("Exit in process!");
-    }
-    return 1;
 }
+
+static char _tls_vars[2] = {0};
+static ULONG _tls_index = 0;
+static const PIMAGE_TLS_CALLBACK _tls_callbacks[2] = {&tls_callback, NULL};
+
+__attribute__((used)) const IMAGE_TLS_DIRECTORY64 _tls_used = {
+    (ULONGLONG)&_tls_vars[0],
+    (ULONGLONG)&_tls_vars[1],
+    (ULONGLONG)&_tls_index,
+    (ULONGLONG)&_tls_callbacks[0],
+    (ULONG)0,
+    (ULONG)0,
+};
