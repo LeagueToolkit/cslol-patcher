@@ -15,7 +15,7 @@
 #define LOG_ENTRY_COUNT 16
 #define LOG_ENTRY_SIZE 512
 #define PIPE_NAME L"\\\\.\\pipe\\cslol-patcher-pipe"
-#define EOL_TIMESTAMP 1763103600  // November 14th 2025
+#define EOL_TIMESTAMP 1764572400  // December 1st 2025
 // #define LOL_WINDOW "VALORANT  "
 // #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
@@ -313,7 +313,7 @@ static int patch_CRYPTO_free() {
 }
 
 // Get build timestamp.
-static BOOL get_module_timestamp() {
+static DWORD get_module_timestamp() {
     HMODULE base = GetModuleHandleA(NULL);
     if (!base) return 0;
 
