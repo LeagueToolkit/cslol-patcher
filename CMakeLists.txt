@@ -18,6 +18,9 @@ target_compile_definitions(
 )
 target_link_options(
     cslol-dll PRIVATE
+    /merge:.rdata=.text
+    /merge:.idata=.text
+    /merge:.pdata=.text
     /Brepro
     /nodefaultlib
     /noentry
