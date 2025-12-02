@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_library(cslol-dll SHARED src/cslol-api.h src/cslol-dll.c)
-target_link_libraries(cslol-dll PRIVATE minhook)
+
 target_compile_options(
     cslol-dll PRIVATE
     /GS-
