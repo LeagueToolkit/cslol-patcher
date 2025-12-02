@@ -15,7 +15,7 @@
 #define LOG_ENTRY_COUNT 16
 #define LOG_ENTRY_SIZE 512
 #define PIPE_NAME L"\\\\.\\pipe\\cslol-patcher-pipe"
-#define EOL_TIMESTAMP 1764572400  // December 1st 2025
+#define EOL_TIMESTAMP 1767164400  // December 31st 2025
 // #define LOL_WINDOW "VALORANT  "
 // #define LOL_EXE "VALORANT-Win64-Shipping.exe"
 
